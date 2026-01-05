@@ -1,4 +1,4 @@
-# Intrusion Detection Project (Full)
+# Intrusion Detection Project
 
 This project contains a full working example of an intrusion detection system using YOLOv8 (Ultralytics), with:
 
