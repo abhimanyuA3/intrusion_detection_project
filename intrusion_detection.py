@@ -1,171 +1,161 @@
+import cv2
 import os
 import time
-import json
-import threading
 from datetime import datetime
 from ultralytics import YOLO
-import cv2
-import shutil
-import logging
-from whatsapp_alert import send_intruder_alert, can_send_alerts
+from collections import defaultdict
+import threading
 
-# Configuration
-MODEL_PATH = os.getenv('MODEL_PATH', 'yolov8n.pt')
-CAMERA_INDEX = int(os.getenv('CAMERA_INDEX', '0'))
-SAVE_DIR = os.getenv('SAVE_DIR', 'intruders')
-FLASK_STATIC_DIR = os.path.join('static', 'intruders')
-METADATA_PATH = os.path.join(SAVE_DIR, 'metadata.json')
-ALARM_FILE = os.getenv('ALARM_FILE', 'alarm.wav')
-ALARM_ENABLED = os.getenv('ALARM_ENABLED', '1') == '1'
-MIN_CONFIDENCE = float(os.getenv('MIN_CONFIDENCE', '0.35'))
-IMG_SIZE = int(os.getenv('IMG_SIZE', '640'))
+# Import Telegram alert instead of WhatsApp
+from telegram_alert import send_telegram_alert
 
-os.makedirs(SAVE_DIR, exist_ok=True)
-os.makedirs(FLASK_STATIC_DIR, exist_ok=True)
+# Try to import playsound for alarm
+try:
+    from playsound import playsound
+    PLAYSOUND_AVAILABLE = True
+except ImportError:
+    print("⚠️  playsound not available. Install with: pip install playsound")
+    PLAYSOUND_AVAILABLE = False
 
-# logging
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
+# Create directory for saving intruder images
+INTRUDERS_DIR = "intruders"
+os.makedirs(INTRUDERS_DIR, exist_ok=True)
 
-# init metadata
-if not os.path.exists(METADATA_PATH):
-    with open(METADATA_PATH, 'w') as f:
-        json.dump([], f)
+# Load YOLOv8 model
+print("Loading YOLOv8 model...")
+model = YOLO("yolov8n.pt")
 
-# Load model
-logging.info('Loading YOLO model...')
-model = YOLO(MODEL_PATH)
+# Video source (0 for webcam, or path to video file)
+VIDEO_SOURCE = 0
 
-# saved intruder ids for this session
-saved_intruders = set()
+# Tracking variables
+detected_intruders = set()  # Track which IDs we've already saved
+detection_history = defaultdict(int)  # Count detections per ID
 
-# play alarm in separate thread
-def play_alarm_nonblocking():
-    if not ALARM_ENABLED:
+# Alarm settings
+ALARM_FILE = "alarm.wav"
+COOLDOWN_SECONDS = 5  # Minimum seconds between alarms
+last_alarm_time = 0
+
+def play_alarm():
+    """Play alarm sound in a separate thread"""
+    global last_alarm_time
+    
+    current_time = time.time()
+    if current_time - last_alarm_time < COOLDOWN_SECONDS:
+        return  # Skip if alarm was played recently
+    
+    last_alarm_time = current_time
+    
+    if not PLAYSOUND_AVAILABLE:
+        print("🔔 ALARM! (audio not available)")
         return
-    def _play():
-        try:
-            from playsound import playsound
-            if os.path.exists(ALARM_FILE):
-                playsound(ALARM_FILE)
-            else:
-                # fallback beep (Windows)
-                try:
-                    import winsound
-                    winsound.Beep(1000, 400)
-                except Exception:
-                    print('Alarm: (no sound available)')
-        except Exception as e:
-            print('Alarm playback error:', e)
-    t = threading.Thread(target=_play, daemon=True)
-    t.start()
+    
+    if not os.path.exists(ALARM_FILE):
+        print("🔔 ALARM! (alarm.wav not found)")
+        return
+    
+    # Play sound in separate thread to avoid blocking
+    threading.Thread(target=lambda: playsound(ALARM_FILE), daemon=True).start()
 
-def append_metadata(entry):
-    try:
-        with open(METADATA_PATH, 'r') as f:
-            data = json.load(f)
-    except Exception:
-        data = []
-    data.append(entry)
-    with open(METADATA_PATH, 'w') as f:
-        json.dump(data, f, indent=2)
-
-def save_full_frame(frame, intruder_id):
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'intruder_{intruder_id}_{ts}.jpg'
-    save_path = os.path.join(SAVE_DIR, filename)
-    cv2.imwrite(save_path, frame)
-    # copy to static folder
-    static_path = os.path.join(FLASK_STATIC_DIR, filename)
-    try:
-        shutil.copyfile(save_path, static_path)
-    except Exception as e:
-        logging.warning('Could not copy to static folder: %s', e)
-    return filename
-
-def is_person(box):
-    try:
-        cls = int(box.cls[0])
-        label = model.names[cls]
-        return label == 'person'
-    except Exception:
-        return False
+def save_intruder_image(frame, track_id):
+    """Save full frame image for new intruder and send Telegram alert"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"intruder_{track_id}_{timestamp}.jpg"
+    filepath = os.path.join(INTRUDERS_DIR, filename)
+    
+    # Save the image
+    cv2.imwrite(filepath, frame)
+    print(f"💾 Saved intruder image: {filename}")
+    
+    # Play alarm
+    play_alarm()
+    
+    # Send Telegram alert with image
+    send_telegram_alert(filepath, track_id)
+    
+    return filepath
 
 def main():
-    cap = cv2.VideoCapture(CAMERA_INDEX)
+    """Main detection loop"""
+    print(f"🎥 Starting video capture from source: {VIDEO_SOURCE}")
+    cap = cv2.VideoCapture(VIDEO_SOURCE)
+    
     if not cap.isOpened():
-        logging.error('Cannot open camera index %s', CAMERA_INDEX)
+        print("❌ Error: Could not open video source")
         return
-
-    logging.info('Starting detection. Press q to quit.')
+    
+    print("✅ Detection started! Press 'q' to quit.")
+    print(f"📁 Intruder images will be saved to: {INTRUDERS_DIR}/")
+    print("=" * 60)
+    
+    frame_count = 0
+    
     while True:
         ret, frame = cap.read()
         if not ret:
-            logging.warning('Frame read failed, exiting.')
+            print("⚠️  Failed to grab frame")
             break
-
-        # Run tracker - model.track returns results where box.id is set by tracker
-        results = model.track(frame, persist=True, imgsz=IMG_SIZE)
-        if len(results) > 0 and getattr(results[0], 'boxes', None) is not None:
-            for box in results[0].boxes:
-                if not is_person(box):
-                    continue
-
-                intruder_id = None
-                try:
-                    if getattr(box, 'id', None) is not None:
-                        intruder_id = int(box.id[0])
-                except Exception:
-                    intruder_id = None
-
-                # draw bbox
-                try:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
-                    txt = f'Intruder {intruder_id}' if intruder_id is not None else 'Person'
-                    cv2.putText(frame, txt, (x1, max(20,y1-10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
-                except Exception:
-                    pass
-
-                # handle new intruder
-                if intruder_id is not None and intruder_id not in saved_intruders:
-                    saved_intruders.add(intruder_id)
-                    filename = save_full_frame(frame, intruder_id)
-                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    entry = {
-                        'id': intruder_id,
-                        'timestamp': timestamp,
-                        'filename': filename
-                    }
-                    append_metadata(entry)
-                    logging.info('New Intruder Detected! ID=%s saved as %s', intruder_id, filename)
-
-                    # play alarm
-                    play_alarm_nonblocking()
-
-                    # send whatsapp alert (if configured)
-                    try:
-                        if can_send_alerts():
-                            # PUBLIC_URL can be set as env var (e.g., from ngrok)
-                            public_url = os.getenv('PUBLIC_URL', None)
-                            if public_url:
-                                media_path = f"{public_url}/intruders/{filename}"
-                            else:
-                                # fallback to localhost (won't work for Twilio remote fetch)
-                                media_path = f"http://localhost:5000/intruders/{filename}"
-                            # send (non-blocking thread)
-                            threading.Thread(target=send_intruder_alert, args=(media_path, intruder_id, timestamp, filename), daemon=True).start()
-                        else:
-                            logging.info('WhatsApp alerts not configured (TWILIO env vars missing).')
-                    except Exception as e:
-                        logging.warning('Failed to send WhatsApp alert: %s', e)
-
-        # show live video
-        cv2.imshow('Intrusion Detection + Tracking (Press q to quit)', frame)
+        
+        frame_count += 1
+        
+        # Run YOLOv8 tracking on the frame
+        # track() returns detections with persistent IDs
+        results = model.track(frame, persist=True, classes=[0], verbose=False)
+        
+        # Process detections
+        if results[0].boxes is not None and results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            track_ids = results[0].boxes.id.cpu().numpy().astype(int)
+            confidences = results[0].boxes.conf.cpu().numpy()
+            
+            for box, track_id, conf in zip(boxes, track_ids, confidences):
+                x1, y1, x2, y2 = map(int, box)
+                
+                # Increment detection count for this ID
+                detection_history[track_id] += 1
+                
+                # Check if this is a new intruder (first time seeing this ID)
+                if track_id not in detected_intruders:
+                    print(f"🚨 NEW INTRUDER DETECTED! ID: {track_id}")
+                    detected_intruders.add(track_id)
+                    
+                    # Save image and send alert
+                    save_intruder_image(frame, track_id)
+                
+                # Draw bounding box
+                color = (0, 0, 255)  # Red for intruder
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                
+                # Draw label
+                label = f"Intruder #{track_id} ({conf:.2f})"
+                cv2.putText(frame, label, (x1, y1 - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        
+        # Display info on frame
+        info_text = f"Frame: {frame_count} | Intruders tracked: {len(detected_intruders)}"
+        cv2.putText(frame, info_text, (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Show the frame
+        cv2.imshow("Intrusion Detection System", frame)
+        
+        # Press 'q' to quit
         if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("\n👋 Stopping detection...")
             break
-
+    
+    # Cleanup
     cap.release()
     cv2.destroyAllWindows()
+    
+    # Summary
+    print("\n" + "=" * 60)
+    print("📊 DETECTION SUMMARY")
+    print("=" * 60)
+    print(f"Total unique intruders detected: {len(detected_intruders)}")
+    print(f"Images saved in: {INTRUDERS_DIR}/")
+    print("=" * 60)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
