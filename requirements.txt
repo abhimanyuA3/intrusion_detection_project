@@ -1,6 +1,0 @@
-ultralytics
-opencv-python
-flask
-playsound==1.2.2
-twilio
-pyngrok
