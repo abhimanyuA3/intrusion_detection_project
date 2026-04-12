@@ -1,6 +1,0 @@
-7658708468:AAEG_PAoPO1o5K-lF04gCbyCoAUcr8SOOfs
-
-before running the python file , run this command in each powershell terminal:
-
-$env:TELEGRAM_BOT_TOKEN="7658708468:AAEG_PAoPO1o5K-lF04gCbyCoAUcr8SOOfs"
-$env:TELEGRAM_CHAT_ID="6835979460"
