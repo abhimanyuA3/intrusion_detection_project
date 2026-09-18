@@ -11,7 +11,7 @@ This directory contains the Python server (`server.py`) that runs directly on yo
 
 ---
 
-## 📦 STEP 1 — Install Dependencies
+## STEP 1 — Install Dependencies
 
 Before running the server, ensure your Raspberry Pi is connected to the internet and install the required Python packages. Open a terminal on your Pi and run:
 
@@ -28,7 +28,7 @@ pip install flask RPi.GPIO
 
 ---
 
-## 🌐 STEP 2 — Find Your Pi IP Address
+## STEP 2 — Find Your Pi IP Address
 
 You will need the IP address of your Raspberry Pi to connect it to the Dashboard in "Real Mode".
 
@@ -44,7 +44,7 @@ Take this IP address and ensure your Dashboard's `.env` file reflects it:
 
 ---
 
-## 🚀 STEP 3 — Run the Server
+## STEP 3 — Run the Server
 
 Navigate to the folder containing `server.py` and run it:
 
@@ -56,7 +56,7 @@ python3 server.py
 
 ---
 
-## 💻 STEP 4 — Access & Test API
+## STEP 4 — Access & Test API
 
 You can test that your Pi server is functioning correctly by visiting the following URLs in your Windows browser (replace with your IP):
 
@@ -80,6 +80,6 @@ You can test that your Pi server is functioning correctly by visiting the follow
 
 ---
 
-## 🎯 STEP 5 — Connect to Your Dashboard
+## STEP 5 — Connect to Your Dashboard
 
 Once the server is running, open your AI Intrusion Dashboard frontend and toggle the modules (Camera, PIR, Infrared) to **"Real"** mode. The dashboard will automatically fetch data and video from the Pi.
